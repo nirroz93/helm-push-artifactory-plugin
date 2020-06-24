@@ -2,12 +2,14 @@ package helm
 
 import (
 	"fmt"
+	"io/ioutil"
+	"path/filepath"
 
-	yaml "gopkg.in/yaml.v2"
-	"k8s.io/helm/pkg/chartutil"
-	"k8s.io/helm/pkg/proto/hapi/chart"
-	cpb "k8s.io/helm/pkg/proto/hapi/chart"
-	"k8s.io/helm/pkg/strvals"
+	"helm.sh/helm/v3/pkg/chart"
+	"helm.sh/helm/v3/pkg/chart/loader"
+	"helm.sh/helm/v3/pkg/chartutil"
+	"helm.sh/helm/v3/pkg/strvals"
+	"sigs.k8s.io/yaml"
 )
 
 type (
@@ -25,7 +27,11 @@ func (c *Chart) SetVersion(version string) {
 // GetChartByName returns a chart by "name", which can be
 // either a directory or .tgz package
 func GetChartByName(name string) (*Chart, error) {
-	cc, err := chartutil.Load(name)
+	chartLoader, err := loader.Loader(name)
+	if err != nil {
+		return nil, err
+	}
+	cc, err := chartLoader.Load()
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +40,25 @@ func GetChartByName(name string) (*Chart, error) {
 
 // CreateChartPackage creates a new .tgz package in directory
 func CreateChartPackage(c *Chart, outDir string) (string, error) {
-	return chartutil.Save(c.Chart, outDir)
+	err := chartutil.SaveDir(c.Chart, outDir)
+	if err != nil {
+		return "", fmt.Errorf("Error while saving chart: %s", err)
+	}
+	const ValuesfileName = "values.yaml"
+	vf := filepath.Join(outDir, c.Name(), ValuesfileName)
+	valuesMap, err := yaml.Marshal(c.Values)
+	if err != nil {
+		return "", fmt.Errorf("Couldn't read values file as YAML: %s", err)
+	}
+	err = ioutil.WriteFile(vf, valuesMap, 0644)
+	if err != nil {
+		return "", fmt.Errorf("Couldn't wring values file: %s", err)
+	}
+	chart, err := loader.LoadDir(filepath.Join(outDir, c.Name()))
+	if err != nil {
+		return "", fmt.Errorf("New chart with the values seems to be invalid (unable to load): %s", err)
+	}
+	return chartutil.Save(chart, outDir)
 }
 
 // OverrideValues overrides values in chart values.yaml file
@@ -47,21 +71,11 @@ func (c *Chart) OverrideValues(overrides []string) error {
 		}
 	}
 
-	ovAsBytes, err := yaml.Marshal(ovMap)
-	if err != nil {
-		return fmt.Errorf("Error while marshal values: %s", err)
-	}
-
-	cvals, err := chartutil.CoalesceValues(c.Chart, &cpb.Config{Raw: string(ovAsBytes)})
+	cvals, err := chartutil.CoalesceValues(c.Chart, ovMap)
 	if err != nil {
 		return fmt.Errorf("Error while overriding chart values: %s", err)
 	}
 
-	cvalsAsYaml, err := cvals.YAML()
-	if err != nil {
-		return fmt.Errorf("Error parsing values to yaml: %s", err)
-	}
-
-	c.Values = &cpb.Config{Raw: cvalsAsYaml}
+	c.Values = cvals
 	return nil
 }
